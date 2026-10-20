@@ -45,14 +45,15 @@
   .fill{height:100%;border-radius:5px}
   .buy .fill{background:var(--buy)} .sell .fill{background:var(--sell)}
   .note{color:var(--mute);font-size:13px;margin-top:22px}
+  select{font:inherit;border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:#fff;color:var(--ink)}
   @media (max-width:640px){
     body{padding:10px;font-size:14px}
     h1{font-size:19px}
     h2{margin:18px 0 6px;font-size:15px}
     .bar{flex-direction:column}
     input#addr{min-width:0;width:100%}
-    input,textarea,button{font-size:16px}
-    button{width:100%;padding:10px}
+    input,textarea,button,select{font-size:16px}
+    button,select{width:100%;padding:10px}
     .info{grid-template-columns:1fr 1fr;gap:6px}
     .info div:first-child{grid-column:1/-1}
     .info div{padding:6px 10px}
@@ -77,6 +78,7 @@
   <p class="sub">How much buying (or selling) it would actually take to reach each price level. Data is read live from the blockchain, nothing to update.</p>
 
   <div class="bar">
+    <select id="chain" aria-label="Network"><option value="ethereum">Ethereum</option><option value="polygon">Polygon</option></select>
     <input id="addr" value="0xf10e8ccdb3f065bf24afa14d08cc6336d4a9a281" spellcheck="false" aria-label="Pool address">
     <button id="go">Load</button>
   </div>
@@ -103,10 +105,32 @@ https://cloudflare-eth.com</textarea>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
 <script>
 const { Interface, getAddress } = ethers.utils;
+const CHAINS = {
+  ethereum: {
+    label:'Ethereum', addr:'0xf10e8ccdb3f065bf24afa14d08cc6336d4a9a281',
+    rpcs:['https://ethereum-rpc.publicnode.com','https://eth.llamarpc.com','https://1rpc.io/eth','https://eth.drpc.org','https://cloudflare-eth.com'],
+    quotes:{
+      '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2':{feed:'0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'}, // WETH / ETH-USD
+      '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48':{usd:1}, // USDC
+      '0xdac17f958d2ee523a2206206994597c13d831ec7':{usd:1}, // USDT
+      '0x6b175474e89094c44da98b954eedeac495271d0f':{usd:1}  // DAI
+    }
+  },
+  polygon: {
+    label:'Polygon', addr:'0x45126b956401daaec92afba2a9953e14b16fb83f',
+    rpcs:['https://polygon-rpc.com','https://polygon-bor-rpc.publicnode.com','https://1rpc.io/matic','https://polygon.drpc.org'],
+    quotes:{
+      '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270':{feed:'0xAB594600376Ec9fD91F8e885dADF0CE036862dE0'}, // WMATIC / MATIC-USD
+      '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619':{feed:'0xF9680D99D6C9589e2a93a78A04A279e509205945'}, // WETH / ETH-USD
+      '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359':{usd:1}, // USDC
+      '0x2791bca1f2de4661ed88a30c99a7a9449aa84174':{usd:1}, // USDC.e
+      '0xc2132d05d31c914a87c6611c10748aeb04b58e8f':{usd:1}, // USDT
+      '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063':{usd:1}  // DAI
+    }
+  }
+};
+const CH = () => CHAINS[$('chain').value];
 const MC3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
-const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'.toLowerCase();
-const STABLES = ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48','0xdAC17F958D2ee523a2206206994597C13D831ec7','0x6B175474E89094C44Da98b954EedeAC495271d0F'].map(a=>a.toLowerCase());
-const CHAINLINK_ETHUSD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419';
 
 const ifMC = new Interface(['function aggregate3((address target,bool allowFailure,bytes callData)[] calls) payable returns ((bool success,bytes returnData)[] returnData)']);
 const ifV3 = new Interface([
@@ -175,15 +199,21 @@ async function loadPool(){
   if (!v3 && !res) throw new Error('Pool not recognised (neither slot0 nor getReserves).');
 
   const tok0 = t0[0], tok1 = t1[0];
-  const [d0,s0,d1,s1,cl,b0,b1] = await multicall([
+  const q0 = CH().quotes[tok0.toLowerCase()], q1 = CH().quotes[tok1.toLowerCase()];
+  const calls = [
     {target:tok0,iface:ifErc,fn:'decimals'},{target:tok0,iface:ifErc,fn:'symbol'},
     {target:tok1,iface:ifErc,fn:'decimals'},{target:tok1,iface:ifErc,fn:'symbol'},
-    {target:CHAINLINK_ETHUSD,iface:ifCL,fn:'latestRoundData'},
-    {target:tok0,iface:ifErc,fn:'balanceOf',args:[addr]},{target:tok1,iface:ifErc,fn:'balanceOf',args:[addr]}]);
+    {target:tok0,iface:ifErc,fn:'balanceOf',args:[addr]},{target:tok1,iface:ifErc,fn:'balanceOf',args:[addr]}];
+  const fIdx = [null,null];
+  [q0,q1].forEach((q,k)=>{ if (q && q.feed){ fIdx[k] = calls.length; calls.push({target:q.feed.toLowerCase(),iface:ifCL,fn:'latestRoundData'}); } });
+  const R = await multicall(calls);
+  const [d0,s0,d1,s1,b0,b1] = R;
+  const usdOf = (q,k) => !q ? null : (q.feed ? (R[fIdx[k]] ? num(R[fIdx[k]][1])/1e8 : null) : 1);
   const S = {
     addr, v3, tok0, tok1, dec0: d0?num(d0[0]):18, dec1: d1?num(d1[0]):18,
     sym0: s0?s0[0]:'T0', sym1: s1?s1[0]:'T1',
-    ethUsd: cl ? num(cl[1])/1e8 : null, bal0: b0?num(b0[0]):0, bal1: b1?num(b1[0]):0, block: parseInt(blockTag,16),
+    isQ0: !!q0, isQ1: !!q1, usd0: usdOf(q0,0), usd1: usdOf(q1,1),
+    bal0: b0?num(b0[0]):0, bal1: b1?num(b1[0]):0, block: parseInt(blockTag,16),
     fee: v3 ? num(fee[0])/1e6 : 0.003
   };
 
@@ -254,11 +284,9 @@ const usd = n => n==null ? '' : '$'+fmt(n);
 
 function render(S){
   const a0 = S.tok0.toLowerCase(), a1 = S.tok1.toLowerCase();
-  const isQuote = a => a===WETH || STABLES.includes(a);
-  const baseIsT0 = !(isQuote(a0) && !isQuote(a1));
+  const baseIsT0 = !(S.isQ0 && !S.isQ1);
   const baseSym = baseIsT0 ? S.sym0 : S.sym1, quoteSym = baseIsT0 ? S.sym1 : S.sym0;
-  const quoteAddr = baseIsT0 ? a1 : a0;
-  const quoteUsd = quoteAddr===WETH ? S.ethUsd : (STABLES.includes(quoteAddr) ? 1 : null);
+  const quoteUsd = baseIsT0 ? S.usd1 : S.usd0;
 
   const rawFactor = Math.pow(10, S.dec0 - S.dec1);
   const Praw = S.v3 ? S.sqrtCur*S.sqrtCur : S.r1/S.r0;
@@ -352,6 +380,13 @@ async function go(){
 }
 $('go').onclick = go;
 $('lv').addEventListener('change', ()=>{ if (window.POOL) render(window.POOL); });
+function setChain(k){
+  const c = CHAINS[k];
+  $('chain').value = k; $('addr').value = c.addr; $('rpcs').value = c.rpcs.join('\n');
+  window.POOL = null; $('info').innerHTML = ''; $('out').innerHTML = '';
+}
+$('chain').onchange = () => { setChain($('chain').value); go(); };
+{ const q = new URLSearchParams(location.search).get('chain'); setChain(CHAINS[q] ? q : 'ethereum'); }
 go();
 </script>
 </body>
